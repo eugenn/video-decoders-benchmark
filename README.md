@@ -1,43 +1,40 @@
 # GPU Video Decoding Benchmark
 
-Comparison of three Python libraries for decoding video on the GPU, all on the **latest FFmpeg they support**:
+Comparison of four Python libraries for decoding video on the GPU, each on the **latest FFmpeg it supports**:
 [torchcodec](https://github.com/meta-pytorch/torchcodec),
+[decord](https://github.com/dmlc/decord),
 [PyAV](https://github.com/pyav-org/pyav) with `hwaccel=cuda`,
 [PyNvVideoCodec](https://developer.nvidia.com/video-codec-sdk) (the official NVIDIA Video Codec SDK wrapper).
-
-> **decord lives in a sibling project** — [`../decord_gpu_test`](../decord_gpu_test) — because it is the only library here that does not work with FFmpeg ≥ 5. Pinning it to FFmpeg 4.4 in its own environment keeps this project free to use the latest FFmpeg for everything else.
 
 ---
 
 ## 1. Results
 
-Video: **Big Buck Bunny 1080p H.264, 2100 frames @ 30 fps (~70 s), ~24 Mbps**
+Video: **Big Buck Bunny 1080p H.264, 300 frames @ 30 fps (10 s), 1920x1080**
 GPU: **Tesla T4** (NVDEC)
-Metric: median across 3 runs after 1 warmup. Every frame is "touched" via `tensor.sum()` to guarantee materialization.
+Metric: median across 3 runs after 1 warmup. This run used `--memory-metrics none`. Every frame is "touched" via `tensor.sum()` to guarantee materialization.
 
-| Rank | Library | FPS ↑ | ms/frame ↓ | Peak GPU mem (torch-alloc) |
+| Rank | Library | FPS ↑ | ms/frame ↓ | Batch |
 |:-:|---|---:|---:|---:|
-| 🥇 | **PyNvVideoCodec** (NVDEC, batch=2) | **1079** | 0.93 | 32 MB |
-| 🥈 | torchcodec (CUDA, batch=2) | 1001 | 1.00 | 107 MB |
-| 🥉 | PyAV (NV12 + FRAME) | 354 | 2.83 | 27 MB |
-| 4 | PyAV (NV12 → GPU RGB) | 204 | 4.89 | 99 MB |
-| 5 | PyAV (RGB + FRAME) | 101 | 9.86 | 54 MB |
+| 🥇 | **PyNvVideoCodec** (NVDEC) | **434.2** | 2.30 | 1 |
+| 🥈 | torchcodec (CUDA) | 434.1 | 2.30 | 1 |
+| 🥉 | decord (GPU) | 403.7 | 2.48 | 1 |
+| 4 | PyAV (NV12 + FRAME) | 351.0 | 2.85 | 1 |
+| 5 | PyAV (NV12 + GPU RGB) | 204.9 | 4.88 | 1 |
+| 6 | PyAV (RGB + FRAME) | 102.2 | 9.79 | 1 |
 
-For the decord numbers (~877 fps, ~95 MB at batch=2), see the [`decord_gpu_test`](../decord_gpu_test) project.
+decord is included in `src/benchmark.py` at `batch=2` by default. To reproduce the old decord-only memory/throughput sweep, pass `--decord-batch-sizes 1,2,4,8,16,32`.
 
 ![benchmark](results/benchmark.png)
 
 ### Interpretation
 
-- **PyNvVideoCodec** is the reference for both speed and memory. It talks directly to NVDEC and leaves frames in NV12 on the GPU, so there is no color-conversion overhead in this test.
-- **torchcodec** is tightly bound by batch size when running on the GPU.
-    - At `batch_size=32` it reserves **>1.5 GB** of GPU RAM (≈53 MB per frame in the requested range).
-    - Reducing to `batch_size=2` cuts memory **15×** (down to ~100 MB) without any throughput loss — slightly faster, in fact.
-    - The decoder cache is also capped via `set_nvdec_cache_capacity(1)`.
-- **PyAV** has three flavors, all using `hwaccel=cuda`:
-    - **RGB + FRAME** is the slowest (101 fps): NVDEC decodes on GPU, the frame is copied back to the CPU, and `to_ndarray("rgb24")` runs an expensive scalar YUV→RGB conversion in libswscale.
-    - **NV12 + FRAME** (354 fps) drops the RGB conversion and just hands back NV12 (Y plane + interleaved UV). Best PyAV variant when downstream code can consume NV12.
-    - **NV12 → GPU RGB** (204 fps) decodes to NV12, uploads to the GPU, and runs a small BT.601 conversion kernel in PyTorch. Faster than CPU RGB but slower than NV12-only because the upload + matmul are not free.
+- **PyNvVideoCodec** and **torchcodec** are effectively tied in this `batch=1` run at about **434 fps**.
+- **decord** is now in the same tier as the leading NVDEC paths, landing at about **404 fps** on the same clip.
+- **PyAV** still splits into three clear modes, all using `hwaccel=cuda`:
+    - **RGB + FRAME** is the slowest (102 fps): NVDEC decodes on GPU, the frame is copied back to the CPU, and `to_ndarray("rgb24")` runs an expensive scalar YUV->RGB conversion in libswscale.
+    - **NV12 + FRAME** (351 fps) drops the RGB conversion and just hands back NV12 (Y plane + interleaved UV). Best PyAV variant when downstream code can consume NV12.
+    - **NV12 + GPU RGB** (205 fps) decodes to NV12, uploads to the GPU, and runs a small BT.601 conversion kernel in PyTorch. Faster than CPU RGB but still well behind the NV12-only path.
 - All PyAV paths still pay a GPU→CPU copy because PyAV does not expose the CUDA frame pointer. A "true GPU" pipeline cannot use PyAV for this reason.
 
 ---
@@ -53,6 +50,7 @@ For the decord numbers (~877 fps, ~95 MB at batch=2), see the [`decord_gpu_test`
 | Python | 3.12 (conda env `video`) | — |
 | torch | 2.11.0+cu126 | — |
 | torchcodec | 0.11.1+cu126 | system FFmpeg (probes 4–8, picks the highest installed) |
+| decord | 0.6.0 built from source, `USE_CUDA=ON` | **FFmpeg 4.4** |
 | PyAV | 17.0.1 | **bundled** in the wheel (FFmpeg 7.x) |
 | PyNvVideoCodec | 2.1.0 | bundled stub demuxer (FFmpeg only used for container parsing) |
 | System FFmpeg | **7.1.x** (libavutil.so.59) | — |
@@ -60,6 +58,7 @@ For the decord numbers (~877 fps, ~95 MB at batch=2), see the [`decord_gpu_test`
 **Why these versions are "the latest each library supports":**
 - **PyAV 17.x** ships its own FFmpeg 7 inside the wheel — system FFmpeg version is irrelevant for it.
 - **torchcodec 0.11** runtime-probes `libavutil.so.{60,59,58,57,56}` in order; with FFmpeg 7 (`.so.59`) installed it loads that. The "not found" log lines for `.so.60` are normal probes, not errors.
+- **decord 0.6.0** must be built against FFmpeg 4.4; newer FFmpeg releases removed APIs it still uses.
 - **PyNvVideoCodec** uses FFmpeg only to parse the container — any modern version works.
 
 ---
@@ -157,6 +156,36 @@ print('PyNvVideoCodec:', nvc.__version__)
 "
 ```
 
+### 3.6 decord (FFmpeg 4.4 source build)
+
+The pip package is CPU-only. For GPU decoding, build decord from source against FFmpeg 4.4:
+
+```bash
+conda create -n ffmpeg4 -c conda-forge 'ffmpeg=4.4' -y
+
+cd /tmp && rm -rf decord
+git clone --recursive --depth 1 https://github.com/dmlc/decord
+cd decord && mkdir build && cd build
+
+FF4=$(conda info --base)/envs/ffmpeg4
+cmake .. \
+    -DUSE_CUDA=ON \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCUDA_NVIDIA_ML_LIBRARY=/usr/local/cuda/lib64/stubs/libnvidia-ml.so \
+    -DCMAKE_CUDA_ARCHITECTURES=75 \
+    -DFFMPEG_DIR=$FF4 \
+    -Wno-dev
+
+make -j$(nproc)
+
+conda activate video
+cd /tmp/decord/python
+python setup.py install
+pip uninstall -y decord 2>/dev/null || true
+```
+
+`-DCMAKE_CUDA_ARCHITECTURES=75` is for Tesla T4. Use the matching value for your GPU.
+
 ### 3.6 Test video
 
 ```bash
@@ -177,6 +206,8 @@ conda activate video
 python src/benchmark.py data/bbb_1080p_h264.mp4
 # any other video file works too:
 python src/benchmark.py /path/to/my_video.mp4 --runs 5 --warmup 2
+# decord batch-size sweep:
+python src/benchmark.py data/bbb_1080p_h264.mp4 --decord-batch-sizes 1,2,4,8,16,32
 ```
 
 Artifacts:
@@ -210,6 +241,12 @@ batch = dec.get_batch_frames(32)            # list[DecodedFrame]
 t = torch.as_tensor(batch[0], device="cuda") # via __cuda_array_interface__
 ```
 
+### 4.5 `decord`: `DECORDError: CUDA not enabled. Requested context GPU(0)`
+The pip wheel was built without CUDA. Build from source against FFmpeg 4.4 as shown in §3.6.
+
+### 4.6 `decord`: build fails against FFmpeg 5+
+decord 0.6.0 still uses APIs removed in newer FFmpeg releases. Use the conda `ffmpeg=4.4` environment and pass `-DFFMPEG_DIR=$FF4` to cmake.
+
 ---
 
 ## 5. Benchmark architecture
@@ -240,14 +277,11 @@ video_decoders_test/
 ├── data/
 │   └── bbb_1080p_h264.mp4       # test video, 30 MB
 ├── src/
-│   └── benchmark.py             # benchmark script (3 libs, no decord)
+│   └── benchmark.py             # benchmark script, including decord
 ├── results/
 │   ├── benchmark.png
-│   └── benchmark.csv
-├── REPORT.md                    # original Russian report (kept for history)
+│   └── benchmark.csv                  
 └── README.md                    # this file
-
-../decord_gpu_test/              # sibling project — decord on FFmpeg 4.4
 ```
 
 ---

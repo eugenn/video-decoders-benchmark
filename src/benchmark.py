@@ -304,9 +304,9 @@ def make_benches(decord_batch_sizes, torchcodec_batch_size=2, pynv_batch_size=2)
             lambda video_path, bs=torchcodec_batch_size: bench_torchcodec(video_path, bs),
             torchcodec_batch_size,
         ),
-        # ("PyAV (RGB + FRAME)", bench_pyav, 1),
-        # ("PyAV (NV12 + FRAME)", bench_pyav_fast, 1),
-        # ("PyAV (NV12 + GPU RGB)", bench_pyav_nv12_gpu_rgb, 1),
+        ("PyAV (RGB + FRAME)", bench_pyav, 1),
+        ("PyAV (NV12 + FRAME)", bench_pyav_fast, 1),
+        ("PyAV (NV12 + GPU RGB)", bench_pyav_nv12_gpu_rgb, 1),
         (
             f"PyNvVideoCodec (NVDEC, batch={pynv_batch_size})",
             lambda video_path, bs=pynv_batch_size: bench_pynvvideocodec(video_path, bs),
